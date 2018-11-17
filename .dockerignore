@@ -1,0 +1,7 @@
+build-and-test.sh
+.git 
+.gitignore
+LICENSE
+rootfs
+uncategorized-notes.txt
+README.md

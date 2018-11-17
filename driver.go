@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/api/types/backend"
 	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/api/types/plugins/logdriver"
 	"github.com/docker/docker/daemon/logger"
@@ -31,6 +32,7 @@ type logPair struct {
 	l      logger.Logger
 	stream io.ReadCloser
 	info   logger.Info
+	unsafeAliveFlag bool
 }
 
 func newDriver() *driver {
@@ -49,24 +51,30 @@ func (d *driver) StartLogging(file string, logCtx logger.Info) error {
 	d.mu.Unlock()
 
 	if logCtx.LogPath == "" {
-		logCtx.LogPath = filepath.Join("/var/log/docker", logCtx.ContainerID)
+		// Use default location and filename.
+		// logCtx.LogPath = filepath.Join("/var/log/docker", logCtx.ContainerID)
+		logCtx.LogPath = filepath.Join("/var/lib/docker/containers", logCtx.ContainerID, logCtx.ContainerID + "-json.log")
 	}
 	if err := os.MkdirAll(filepath.Dir(logCtx.LogPath), 0755); err != nil {
 		return errors.Wrap(err, "error setting up logger dir")
 	}
+
+	// Tags can also be used, but our elastic does not like nested json, and it does not seem to produce valid json anyway.
+	// logCtx.Config["tag"] = "a,b,c"
+
 	l, err := jsonfilelog.New(logCtx)
 	if err != nil {
 		return errors.Wrap(err, "error creating jsonfile logger")
 	}
 
-	logrus.WithField("id", logCtx.ContainerID).WithField("file", file).WithField("logpath", logCtx.LogPath).Debugf("Start logging")
+	logrus.WithField("id", logCtx.ContainerID).WithField("name", logCtx.ContainerName).WithField("file", file).WithField("logpath", logCtx.LogPath).Debugf("Start logging")
 	f, err := fifo.OpenFifo(context.Background(), file, syscall.O_RDONLY, 0700)
 	if err != nil {
 		return errors.Wrapf(err, "error opening logger fifo: %q", file)
 	}
 
 	d.mu.Lock()
-	lf := &logPair{l, f, logCtx}
+	lf := &logPair{l, f, logCtx, true}
 	d.logs[file] = lf
 	d.idx[logCtx.ContainerID] = lf
 	d.mu.Unlock()
@@ -80,8 +88,11 @@ func (d *driver) StopLogging(file string) error {
 	d.mu.Lock()
 	lf, ok := d.logs[file]
 	if ok {
+		lf.unsafeAliveFlag = false
 		lf.stream.Close()
 		delete(d.logs, file)
+		lf.l.Close()
+		logrus.WithField("file", file).Debugf(fmt.Sprintf("Logging stream closed for %s", file))
 	}
 	d.mu.Unlock()
 	return nil
@@ -92,6 +103,12 @@ func consumeLog(lf *logPair) {
 	defer dec.Close()
 	var buf logdriver.LogEntry
 	for {
+		if !lf.unsafeAliveFlag {
+			logrus.WithField("id", lf.info.ContainerID).Infof("shutting down log logger due to alive flag")
+			lf.stream.Close()
+			return
+		}
+
 		if err := dec.ReadMsg(&buf); err != nil {
 			if err == io.EOF {
 				logrus.WithField("id", lf.info.ContainerID).WithError(err).Debug("shutting down log logger")
@@ -99,17 +116,25 @@ func consumeLog(lf *logPair) {
 				return
 			}
 			dec = protoio.NewUint32DelimitedReader(lf.stream, binary.BigEndian, 1e6)
+			// Added continue, as we don't want a log line if we are in error.
+			continue
 		}
+		var attrs []backend.LogAttr
+		attrs = append(attrs, backend.LogAttr{Key: "name", Value: lf.info.ContainerName})
 		var msg logger.Message
+		msg.Attrs = attrs
 		msg.Line = buf.Line
-		msg.Source = buf.Source
-		msg.Partial = buf.Partial
+		msg.Source = lf.info.Name() + " " + buf.Source
+		// next line seems to be for an older docker version, so disabled it.
+		// msg.Partial = buf.Partial
 		msg.Timestamp = time.Unix(0, buf.TimeNano)
 
 		if err := lf.l.Log(&msg); err != nil {
 			logrus.WithField("id", lf.info.ContainerID).WithError(err).WithField("message", msg).Error("error writing log message")
 			continue
 		}
+
+		logrus.WithField("id", lf.info.ContainerID).WithField("name", lf.info.ContainerName).WithField("msg", msg.Line).Debug("test logging")
 
 		buf.Reset()
 	}
@@ -134,7 +159,9 @@ func (d *driver) ReadLogs(info logger.Info, config logger.ReadConfig) (io.ReadCl
 
 		enc := protoio.NewUint32DelimitedWriter(w, binary.BigEndian)
 		defer enc.Close()
-		defer watcher.Close()
+		// next line did not compile. just guessed for a replacement close, no clue if it's correct.
+		// defer watcher.Close()
+		defer w.Close()
 
 		var buf logdriver.LogEntry
 		for {
@@ -146,7 +173,7 @@ func (d *driver) ReadLogs(info logger.Info, config logger.ReadConfig) (io.ReadCl
 				}
 
 				buf.Line = msg.Line
-				buf.Partial = msg.Partial
+				//buf.Partial = msg.Partial
 				buf.TimeNano = msg.Timestamp.UnixNano()
 				buf.Source = msg.Source
 
@@ -165,3 +192,4 @@ func (d *driver) ReadLogs(info logger.Info, config logger.ReadConfig) (io.ReadCl
 
 	return r, nil
 }
+

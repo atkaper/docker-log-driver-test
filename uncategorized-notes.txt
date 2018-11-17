@@ -1,0 +1,25 @@
+Some URL's which helped me in the process of getting this to run:
+--------------------------------------------------------------------------------------------------
+
+https://github.com/SumoLogic/sumologic-docker-logging-driver/blob/master/plugin_install.sh
+https://github.com/logzio/Docker-Logging-Driver/
+https://github.com/timberio/timber-docker-logging-driver
+https://github.com/moby/moby/blob/master/daemon/logger/logger.go   # message format
+https://github.com/likevi-MSFT/sblogdriver  # clone with 48 extra commits - fixes? check!
+https://github.com/cpuguy83/docker-log-driver-test/compare/master...anandmishranist:dry-run-test   # other build file, and readme
+https://github.com/cpuguy83/docker-log-driver-test/issues/2   # note about wrong flow on stop logging
+
+in config.json specify mounts;
+	"mounts": [
+		{
+			"source": "/mnt/logs",
+			"destination": "/mnt/logs",
+			"type": "bind",
+			"options": ["rbind", "rw"]
+		}
+],
+
+https://github.com/moby/moby/blob/v17.05.0-ce/daemon/logger/jsonfilelog/jsonfilelog.go   # json logger source
+https://godoc.org/github.com/docker/docker/daemon/logger#Info.ExtraAttributes  # logger attributes for info
+https://sourcegraph.com/github.com/docker/docker/-/blob/daemon/logger/loginfo.go#L35   # usage/reference tool?
+
